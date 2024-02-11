@@ -1,8 +1,10 @@
+import math
 import numpy as np
 from sklearn.cluster import DBSCAN
 from scipy.interpolate import splprep, splev
 import typing
-from typing import Tuple, List, Sequence, TypeVar, Annotated, Literal, Union
+from typing import Tuple, List, Sequence, TypeVar, Annotated, Literal, Union, Generic, Dict
+
 import cv2
 from numpy import uint8
 
@@ -16,6 +18,8 @@ import numpy.typing as npt
 
 DType = TypeVar("DType", bound=np.generic)
 TRegionBox = Tuple[int,int,int,int]
+Color3 = Tuple[int, int,int]
+
 TPoint = Tuple[int,int]
 # TContourAnnotated = Annotated[npt.NDArray[DType], TPoint]
 # TContour = List[TPoint]
@@ -24,7 +28,21 @@ TContours = Sequence[TContour]
 # TImageData = npt.NDArray[uint8]
 
 
+
 TImage = cvt.MatLike
+
+KVData = TypeVar('KVData')
+TKeyType = Union[Literal["white"],Literal["black"]]
+
+TKeyKV = Dict[int, Tuple[TKeyType,KVData]]
+
+
+
+# TKeyRegionsKV = Tuple[int, Tuple[TRegionBox,TKeyType]]
+# TKeyAvgColorsKV = Tuple[int, Tuple[Color3,TKeyType]]
+# TKeyContoursKV  = Tuple[int, Tuple[TContour,TKeyType]]
+
+
 
 
 def flatmap_contour_points(contours: TContours) -> npt.NDArray:
@@ -338,7 +356,7 @@ def merge_and_sort_contours(contours1 : TContours, contours2 : TContours):
 
 #     return simplified_contours
 
-def simplify_contours_douglas_peucker(contours : TContours, epsilon = 5):
+def simplify_contours_douglas_peucker(contours : TContours, epsilon = 2):
     simplified_contours = [cv2.approxPolyDP(contour, epsilon, True) for contour in contours]
     return simplified_contours
 
@@ -351,20 +369,21 @@ def contours_to_list(contours : TContours):
         contour_list.append(points)
     return contour_list
 
-def get_key_color(image: Image, contour : TContour):
-    mask = np.zeros(image.data.shape[:2], dtype=np.uint8)
-    cv2.drawContours(mask, [contour], -1, [255], cv2.FILLED)
-    # Image(mask).to_rgb().display()
-    mean = cv2.mean(image.data, mask=mask)
-    return mean
 
 
-def bottom_half_brect(contours: List[TContour], offset=10) -> List[TRegionBox]:
-    bottom_half_contours : List[TRegionBox] = []
-    for contour in contours:
-        x, y, w, h = contour_to_bounding_rect(contour)
-        bottom_half_contours.append((x, y + h // 2 + offset, w, h // 2 - offset))
-    return bottom_half_contours
+def is_rgb(image):
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        return True
+    return False
+
+
+
+# def bottom_half_brect(contours: List[TContour], offset=10) -> List[TRegionBox]:
+#     bottom_half_contours : List[TRegionBox] = []
+#     for contour in contours:
+#         x, y, w, h = contour_to_bounding_rect(contour)
+#         bottom_half_contours.append((x, y + h // 2 + offset, w, h // 2 - offset))
+#     return bottom_half_contours
 
 def scale_bounding_rect(rect: TRegionBox, scale_amount: float, direction='center') -> TRegionBox:
     x, y, width, height = rect
@@ -433,45 +452,114 @@ def adjust_gamma(image: TImage, gamma=1.0) -> TImage:
     table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
     return cv2.LUT(image, table)
 
-def get_keys_colors(image: Image, black_key_contours: List[TContour], white_key_contours: List[TContour]) -> list:
-    brects: List[TRegionBox] = [contour_to_bounding_rect(cnt) for cnt in key_contours]
-    bh_key_contours = [bounding_rect_to_contour(crop_brect(crop_brect(scale_bounding_rect(brect,0.8),"bottom",50),"bottom", 45)) for brect in brects]
-    colors = []
 
 
-    # debug_show_bboxes(image,bh_regions)
-    # debug_show_contours(image,bh_key_contours)
+def transform_key_contours(keys: TKeyKV[TContour]) -> TKeyKV[TContour]:
+    kv : TKeyKV[TContour] = dict()
+    for idx, val in keys.items():
+        brect = contour_to_bounding_rect(val[1])
+        new_brect = None
+        if (val[0] == "black"):
+            new_brect = crop_brect(scale_bounding_rect(brect,0.8), "bottom", 40)
+            
+        if (val[0] == "white"):
+            new_brect = crop_brect(brect, "bottom", 20)
+
+        if (new_brect is None):
+            raise Exception("Fuuuuuuuuuu....")
+
+        new_contour = bounding_rect_to_contour(new_brect)
+        kv[idx] = (val[0], new_contour)
+
+    return kv
+
+
+def get_key_color(image: Image, contour : TContour):
+    mask = np.zeros(image.data.shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, [255], cv2.FILLED)
+    # Image(mask).to_rgb().display()
+    mean = cv2.mean(image.data, mask=mask) 
+    return mean
+
+
+def get_keys_colors(image: Image, keys: TKeyKV[TContour]) -> TKeyKV[Color3]:
+
     src = image.deep_copy().to_grayscale()
-    gamma = 0.3
+    gamma = 2
     gamma_corrected = adjust_gamma(src.data,gamma)
-    clahe = cv2.createCLAHE(clipLimit=40.0, tileGridSize=(9, 9))
+    clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(9, 9))
     clahe_image = clahe.apply(gamma_corrected)
     # Image(clahe_image).display()
-    debug_show_contours(Image(gamma_corrected),bh_key_contours,False)
 
-    debug_show_contours(Image(clahe_image),bh_key_contours,False)
+    # debug_show_contours(Image(clahe_image),[v[1] for k,v in keys.items()],False)
+    kv : TKeyKV[Color3] = dict()
+    for idx, val in keys.items():
+        color = get_key_color(Image(clahe_image),val[1])
+        kv[idx] = (val[0], (int(color[0]),0,0))
 
-    # Image(thresholded_image).display()
-    for contour in bh_key_contours:
-        average_color = get_key_color(Image(clahe_image), np.mat(contour))
-        # print(average_color)
-        colors.append(average_color)
-    return colors
+    return kv
 
 
+# def detect_black_presses(curr_colors: List[tuple], base_colors: List[tuple], threshold: int = 80) -> List[bool]:
+#     key_presses : List[bool] = []
 
-def detect_key_presses(curr_colors: List[tuple], base_colors: List[tuple], threshold: int = 90) -> list:
-    key_presses = []
+#     for curr_color, base_color in zip(curr_colors, base_colors):
+#         hue_diff = abs(curr_color[0] - base_color[0])
+#         brightness_diff = curr_color[2] - base_color[2]
+#         key_presses.append(hue_diff > threshold or brightness_diff > threshold)
+#     return key_presses
 
-    for curr_color, base_color in zip(curr_colors, base_colors):
-        distance = np.linalg.norm(np.array(curr_color) - np.array(base_color))
+
+# def detect_white_presses(curr_colors: List[tuple], base_colors: List[tuple], threshold: int = 30) -> List[bool]:
+
+#     key_presses : List[bool] = []
+
+#     for curr_color, base_color in zip(curr_colors, base_colors):
+#         hue_diff = abs(curr_color[0] - base_color[0])
+#         brightness_diff = base_color[2] - curr_color[2]
+#         key_presses.append(hue_diff > threshold or brightness_diff > threshold)
+#     return key_presses
+
+
+def rgb_distance(color1: Color3, color2: Color3) -> int:
+    return int(math.sqrt((color1[0] - color2[0]) ** 2 + (color1[1] - color2[1]) ** 2 + (color1[2] - color2[2]) ** 2))
+
+def hsv_distance(color1: Color3, color2: Color3) -> int:
+    def rgb_to_hsv(rgb_color):
+        r, g, b = rgb_color
+        return cv2.cvtColor(np.mat([rgb_color]), cv2.COLOR_RGB2HSV_FULL)[0][0]
+
+    hsv1 = rgb_to_hsv(color1)
+    hsv2 = rgb_to_hsv(color2)
+    dh = min(abs(hsv1[0] - hsv2[0]), 360 - abs(hsv1[0] - hsv2[0])) / 360.0
+    ds = abs(hsv1[1] - hsv2[1]) / 100.0
+    dv = abs(hsv1[2] - hsv2[2]) / 100.0
+    return int(math.sqrt(dh ** 2 + ds ** 2 + dv ** 2))
+
+def gray_distance(color1: Color3, color2: Color3) -> int:
+    def rgb_to_gray(rgb_color):
+        return np.dot(rgb_color, [0.2989, 0.5870, 0.1140])
+
+    gray1 = rgb_to_gray(color1)
+    gray2 = rgb_to_gray(color2)
+    return int(abs(gray1 - gray2))
+
+
+def detect_presses(frame_colors: TKeyKV[Color3], base_colors: TKeyKV[Color3], threshold: int = 50) -> List[bool]:
+    key_presses : List[bool] = []
+
+    for idx, val in frame_colors.items():
+        frame_color = val[1]
+        base_color = base_colors[idx][1]
+        # threshold = int(threshold * 2)
+        distance = rgb_distance(base_color, frame_color)
         
-        if int(distance) > threshold:
-            key_presses.append(True)  # pressed
-        else:
-            key_presses.append(False)  # not pressed
+        key_presses.append(distance > threshold)
 
     return key_presses
+
+
+
 
 
 def process_video(cap: cv2.VideoCapture, action : typing.Callable, frame_interval: int = 1, start = 0 , end = None) -> None:
@@ -558,28 +646,54 @@ def get_roi_box(base_image: Image) -> TRegionBox:
     return target_bbox_roi
 
 
+def merge_contours( white_contours : List[TContour] , black_contours : List[TContour]) -> TKeyKV[TContour]:
+    kv : TKeyKV[TContour] = dict()
 
-def get_key_contours(roi_image: Image) -> Tuple[List[TContour],List[TContour]]: #white, black
+    sorted_contours = sort_contours_horizontal(white_contours + black_contours)
+
+    for index,contour in enumerate(sorted_contours):
+        belongs_to : TKeyType | None = None
+        for cnt in white_contours:
+            if np.array_equal(cnt, contour):
+                belongs_to = "white"
+
+        for cnt in black_contours:
+            if np.array_equal(cnt, contour):
+                belongs_to = "black"
+
+        if belongs_to is None:
+            raise Exception("Da fuck is goin on dis contour no black no white what are you bro?")
+
+        kv[index] = (belongs_to,contour)
+        
+    return kv
+
+
+def get_key_contours(roi_image: Image) -> TKeyKV[TContour]:
     contour_img = roi_image.deep_copy().to_grayscale().threshold(110,255)
     # debug_show_bboxes(complexImage.deep_copy().to_rgb(),[target_bbox_roi])
     white_keys_contours = filter_contours(contour_img.get_contours(),1000)
-
+    white_simplified = simplify_contours_douglas_peucker(white_keys_contours)
     # debug_show_contours(roi_image,white_keys_contours)
 
     contoured_mask = create_mask_from_contours(roi_image.data.shape,white_keys_contours)
     not_contoured_mask = Image(reverse_mask(close_gaps(contoured_mask, 10)))
 
     black_keys_contours = filter_contours(not_contoured_mask.deep_copy().to_grayscale().get_contours(),200)
+    black_simplified = simplify_contours_douglas_peucker(black_keys_contours)
     # debug_show_contours(roi_image,black_keys_contours)
 
     # all_keys_contours = filter_contours(merge_and_sort_contours(white_keys_contours, black_keys_contours),500)
     # simplified_contours = filter_contours(simplify_contours_douglas_peucker(all_keys_contours,2))
 
-    debug_show_contours(roi_image,simplified_contours)
+    merged = merge_contours(white_simplified, black_simplified)
+
+
+    debug_show_contours(roi_image,[v[1] for k,v in merged.items()])
     # bounding_rects = extract_key_bounding_rects(simplified_contours)
 
-    key_contours = contours_to_list(simplified_contours)
-    return key_contours
+    # key_contours = contours_to_list(simplified_contours)
+    return merge_contours(white_simplified, black_simplified)
 
     
 
@@ -608,9 +722,9 @@ def get_key_contours(roi_image: Image) -> Tuple[List[TContour],List[TContour]]: 
 
 
 def main():
-    input_vid = "src2.mkv"
-    start_time_sec = 450/60
-    end_time_sec = start_time_sec + 4
+    input_vid = "src.mp4"
+    start_time_sec = 126.5
+    end_time_sec = start_time_sec + 20
     FORCE_CACHE = False
 
     video_cap = cv2.VideoCapture(input_vid)
@@ -622,25 +736,25 @@ def main():
 
     video_fps = video_cap.get(cv2.CAP_PROP_FPS)
     print(video_fps)
-    # base_frame_index = int(start_time_sec * video_fps)
-    base_frame_index = 153
+    base_frame_index = int(start_time_sec * video_fps)
+    # base_frame_index = 153
 
     base_frame_image = Image(get_nth_frame(video_cap,base_frame_index)).crop_from("up",4/8)
 
     roi_box = get_roi_box(base_frame_image)
     roi_image = base_frame_image.deep_copy().crop(*roi_box)
     key_contours = get_key_contours(roi_image)
+    transformed_contours = transform_key_contours(key_contours)
 
-
-    base_avg_colors = get_keys_colors(roi_image,key_contours)
+    base_avg_colors_kv = get_keys_colors(roi_image,transformed_contours)
     playback_data={}
 
     def action(frameNumber: int,frame:TImage):
         frame_img = Image(frame).crop_from("up",4/8)
         frame_img.crop(*roi_box)
-        frame_colors = get_keys_colors(frame_img,key_contours)
-        
-        keypresses = detect_key_presses(frame_colors,base_avg_colors)
+        frame_avg_colors_kv = get_keys_colors(frame_img,transformed_contours)
+
+        keypresses = detect_presses(frame_avg_colors_kv,base_avg_colors_kv)
         print(f'processed frame {frameNumber}')
         print(f'keys pressed : {[i for i,kp in enumerate(keypresses) if kp == True]}')
         playback_data[frameNumber] = keypresses
